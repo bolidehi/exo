@@ -48,11 +48,11 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       end_layer=request.shard.end_layer,
       n_layers=request.shard.n_layers,
     )
-    prompt = request.prompt
-    image_str = request.image_str
-    request_id = request.request_id
-    result = await self.node.process_prompt(shard, prompt, image_str, request_id)
-    if DEBUG >= 5: print(f"SendPrompt {shard=} {prompt=} {image_str=} {request_id=} result: {result}")
+    prompts = request.prompts
+    image_strs = request.image_strs
+    request_ids = request.request_ids
+    result = await self.node.process_prompt(shard, prompts, image_strs, request_ids)
+    if DEBUG >= 5: print(f"SendPrompt {shard=} {prompts=} {image_strs=} {request_ids=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
 
@@ -64,11 +64,11 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       n_layers=request.shard.n_layers,
     )
     tensor = np.frombuffer(request.tensor.tensor_data, dtype=np.dtype(request.tensor.dtype)).reshape(request.tensor.shape)
-    request_id = request.request_id
+    request_ids = request.request_ids
     inference_state = request.inference_state
 
-    result = await self.node.process_tensor(shard, tensor, request_id, inference_state)
-    if DEBUG >= 5: print(f"SendTensor tensor {shard=} {tensor=} {request_id=} result: {result}")
+    result = await self.node.process_tensor(shard, tensor, request_ids, inference_state)
+    if DEBUG >= 5: print(f"SendTensor tensor {shard=} {tensor=} {request_ids=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
 

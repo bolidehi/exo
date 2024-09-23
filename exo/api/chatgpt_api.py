@@ -153,7 +153,7 @@ class PromptSession:
 
 
 class ChatGPTAPI:
-  def __init__(self, node: Node, inference_engine_classname: str, response_timeout: int = 90, on_chat_completion_request: Callable[[str, ChatCompletionRequest, str], None] = None):
+  def __init__(self, node: Node, inference_engine_classname: str, response_timeout: int = 90, max_batch_size: int = 4, max_batch_wait: int = 10, on_chat_completion_request: Callable[[str, ChatCompletionRequest, str], None] = None):
     self.node = node
     self.inference_engine_classname = inference_engine_classname
     self.response_timeout = response_timeout
@@ -182,6 +182,45 @@ class ChatGPTAPI:
 
     # Add middleware to log every request
     self.app.middlewares.append(self.log_request)
+
+    self.queue = asyncio.Queue(maxsize=100)
+    self.app.on_startup.append(self.on_startup)
+    self.app.on_cleanup.append(self.on_cleanup)
+
+    self.max_batch_size = max_batch_size
+    self.max_batch_wait = max_batch_wait
+
+  async def on_startup(self, _):
+    self.processor_future = asyncio.ensure_future(self.batch_processor())
+
+  async def on_cleanup(self, _):
+    self.processor_future.cancel()
+    await self.processor_future
+
+  async def batch_processor(self):
+    while True:
+      shard = None
+      prompts, image_strs, request_ids, futures = [], [], [], []
+      last_infer = time.time()
+      while len(prompts) < self.max_batch_size and (time.time()-last_infer) < self.max_batch_wait:
+        try:
+          shard, prompt, image_str, request_id, future = self.queue.get_nowait() # TODO: batch according to shard
+          self.queue.task_done()
+          prompts.append(prompt)
+          image_strs.append(image_str)
+          request_ids.append(request_id)
+          futures.append(future)
+        except asyncio.QueueEmpty:
+          await asyncio.sleep(0.1)
+
+      if not prompts:
+        await asyncio.sleep(1)
+        continue
+
+      image_strs = image_strs if any(image_strs) else None
+      await self.node.process_prompt(shard, prompts, image_strs, request_ids=request_ids)
+      for future in futures:
+        future.set_result(None)
 
   async def log_request(self, app, handler):
     async def middleware(request):
@@ -249,7 +288,9 @@ class ChatGPTAPI:
 
     if DEBUG >= 2: print(f"Sending prompt from ChatGPT api {request_id=} {shard=} {prompt=} {image_str=}")
     try:
-      await self.node.process_prompt(shard, prompt, image_str, request_id=request_id)
+      future = asyncio.Future()
+      await self.queue.put((shard, prompt, image_str, request_id, future))
+      await future
     except Exception as e:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"detail": f"Error processing prompt (see logs with DEBUG>=2): {str(e)}"}, status=500)
@@ -273,10 +314,9 @@ class ChatGPTAPI:
           self.prev_token_lens[request_id] = max(prev_last_tokens_len, len(tokens))
           new_tokens = tokens[prev_last_tokens_len:]
           finish_reason = None
-          eos_token_id = tokenizer.special_tokens_map.get("eos_token_id") if hasattr(tokenizer, "_tokenizer") and isinstance(tokenizer._tokenizer,
-                                                                                                                             AutoTokenizer) else getattr(tokenizer, "eos_token_id", None)
-          if len(new_tokens) > 0 and new_tokens[-1] == eos_token_id:
-            new_tokens = new_tokens[:-1]
+          eos_token_id = tokenizer.special_tokens_map.get("eos_token_id") if hasattr(tokenizer, "_tokenizer") and isinstance(tokenizer._tokenizer, AutoTokenizer) else getattr(tokenizer, "eos_token_id", None)
+          if len(new_tokens) > 0 and eos_token_id in new_tokens:
+            new_tokens = new_tokens[:new_tokens.index(eos_token_id)]
             if is_finished:
               finish_reason = "stop"
           if is_finished and not finish_reason:
@@ -322,8 +362,8 @@ class ChatGPTAPI:
         finish_reason = "length"
         eos_token_id = tokenizer.special_tokens_map.get("eos_token_id") if isinstance(getattr(tokenizer, "_tokenizer", None), AutoTokenizer) else tokenizer.eos_token_id
         if DEBUG >= 2: print(f"Checking if end of tokens result {tokens[-1]=} is {eos_token_id=}")
-        if tokens[-1] == eos_token_id:
-          tokens = tokens[:-1]
+        if eos_token_id in tokens:
+          tokens = tokens[:tokens.index(eos_token_id)]
           finish_reason = "stop"
 
         return web.json_response(generate_completion(chat_request, tokenizer, prompt, request_id, tokens, stream, finish_reason, "chat.completion"))

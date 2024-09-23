@@ -1,6 +1,6 @@
 import os
 import asyncio
-from typing import Callable, TypeVar, Optional, Dict, Generic, Tuple, List
+from typing import Callable, TypeVar, Optional, Dict, Generic, Tuple, List, Deque
 import socket
 import random
 import platform
@@ -9,6 +9,7 @@ import uuid
 import netifaces
 from pathlib import Path
 import tempfile
+from collections import deque
 
 DEBUG = int(os.getenv("DEBUG", default="0"))
 DEBUG_DISCOVERY = int(os.getenv("DEBUG_DISCOVERY", default="0"))
@@ -94,20 +95,27 @@ K = TypeVar("K")
 class AsyncCallback(Generic[T]):
   def __init__(self) -> None:
     self.condition: asyncio.Condition = asyncio.Condition()
-    self.result: Optional[Tuple[T, ...]] = None
+    self.result: Deque[Tuple[T, ...]] = deque()
     self.observers: list[Callable[..., None]] = []
 
   async def wait(self, check_condition: Callable[..., bool], timeout: Optional[float] = None) -> Tuple[T, ...]:
     async with self.condition:
-      await asyncio.wait_for(self.condition.wait_for(lambda: self.result is not None and check_condition(*self.result)), timeout)
-      assert self.result is not None  # for type checking
-      return self.result
+      async def wait_for_valid_result():
+        while True:
+          while self.result:
+            if self.result[0] and check_condition(*self.result[0]):
+              return True
+            self.result.popleft()
+          await self.condition.wait()
+
+      await asyncio.wait_for(wait_for_valid_result(), timeout)
+      return self.result.popleft()
 
   def on_next(self, callback: Callable[..., None]) -> None:
     self.observers.append(callback)
 
   def set(self, *args: T) -> None:
-    self.result = args
+    self.result.append(args)
     for observer in self.observers:
       observer(*args)
     asyncio.create_task(self.notify())
