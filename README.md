@@ -94,13 +94,14 @@ The current recommended way to install exo is from source.
 ```sh
 git clone https://github.com/exo-explore/exo.git
 cd exo
-uv tool install .
+uv tool install -e .
 ```
 
 
 ### Troubleshooting
 
 - If running on Mac, MLX has an [install guide](https://ml-explore.github.io/mlx/build/html/install.html) with troubleshooting steps.
+- If `exo` does not work after running `uv tool install -e .` you may need to run `export PATH="$HOME/.local/bin:$PATH"`.
 
 ### Performance
 
