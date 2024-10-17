@@ -53,7 +53,6 @@ class MLXDynamicShardInferenceEngine(InferenceEngine):
     self.stateful_sharded_model = await loop.run_in_executor(self.executor, StatefulShardedModel, shard, model_shard)
     self.shard = shard
 
+    # already loaded into memory by ensure_shard,
   async def preload_model(self, shard: Shard) -> None:
     await self.ensure_shard(shard)
-    # The model is already loaded into memory by ensure_shard,
-    # so we don't need to do anything else here.
