@@ -100,20 +100,26 @@ api = ChatGPTAPI(
 node.on_token.register("update_topology_viz").on_next(
   lambda req_id, tokens, __: topology_viz.update_prompt_output(req_id, inference_engine.tokenizer.decode(tokens)) if topology_viz and hasattr(inference_engine, "tokenizer") else None
 )
-def preemptively_start_download(request_id: str, opaque_status: str):
+
+async def preemptively_start_download(request_id: str, opaque_status: str):
     try:
         status = json.loads(opaque_status)
         if status.get("type") == "node_status" and status.get("status") == "start_process_prompt":
             current_shard = node.get_current_shard(Shard.from_dict(status.get("shard")))
             if DEBUG >= 2: print(f"Preemptively starting download for {current_shard}")
-            asyncio.create_task(shard_downloader.ensure_shard(current_shard))
+            await shard_downloader.ensure_shard(current_shard)
+            # Preload the model after ensuring the shard is downloaded
+            await node.preload_models([current_shard])
+            if DEBUG >= 2: print(f"Preloaded model for {current_shard}")
             return current_shard
     except Exception as e:
         if DEBUG >= 2:
-            print(f"Failed to preemptively start download: {e}")
+            print(f"Failed to preemptively start download or preload: {e}")
             traceback.print_exc()
     return None
-node.on_opaque_status.register("start_download").on_next(preemptively_start_download)
+
+# Update the registration to use the async version
+node.on_opaque_status.register("start_download").on_next(lambda request_id, opaque_status: asyncio.create_task(preemptively_start_download(request_id, opaque_status)))
 
 if args.prometheus_client_port:
   from exo.stats.metrics import start_metrics_server
