@@ -2,7 +2,13 @@ import argparse
 import asyncio
 import signal
 import json
-import logging
+import platform
+import os
+import sys
+import time
+import subprocess
+import traceback
+import uuid
 import time
 import traceback
 import uuid
@@ -25,6 +31,7 @@ from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration.node import Node
 from exo.models import model_base_shards
 from exo.viz.topology_viz import TopologyViz
+
 
 # parse args
 parser = argparse.ArgumentParser(description="Initialize GRPC Discovery")
@@ -201,6 +208,19 @@ async def run_model_cli(node: Node, inference_engine: InferenceEngine, model_nam
   finally:
     node.on_token.deregister(callback_id)
 
+def open_web_chat():
+  if web_chat_urls:
+    electron_app_path = os.path.join('exo', 'electron-app')
+    subprocess.Popen(['npm', 'install'], cwd=electron_app_path)
+    subprocess.Popen(['npm', 'start'], 
+                    cwd=electron_app_path, 
+                    env={**os.environ, 'CHAT_URL': web_chat_urls[0]})
+
+def is_frozen():
+  return getattr(sys, 'frozen', False) or os.path.basename(sys.executable) == "exo" \
+    or ('Contents/MacOS' in str(os.path.dirname(sys.executable))) \
+    or ('__compiled__' in globals())
+ 
 
 async def main():
   loop = asyncio.get_running_loop()
@@ -208,9 +228,11 @@ async def main():
   # Use a more direct approach to handle signals
   def handle_exit():
     asyncio.ensure_future(shutdown(signal.SIGTERM, loop))
+  
 
-  for s in [signal.SIGINT, signal.SIGTERM]:
-    loop.add_signal_handler(s, handle_exit)
+  if platform.system() != "Windows":
+    for s in [signal.SIGINT, signal.SIGTERM]:
+      loop.add_signal_handler(s, handle_exit)
 
   await node.start(wait_for_peers=args.wait_for_peers)
 
@@ -222,6 +244,12 @@ async def main():
     await run_model_cli(node, inference_engine, model_name, args.prompt)
   else:
     asyncio.create_task(api.run(port=args.chatgpt_api_port))  # Start the API server as a non-blocking task
+    if not is_frozen():
+      try:
+        open_web_chat()
+      except Exception as e:
+        print(f"Error opening web chat: {e}")
+        traceback.print_exc()
     await asyncio.Event().wait()
 
 

@@ -4,6 +4,9 @@ test_weights.npz
 .exo_used_ports
 .exo_node_id
 .idea
+.DS_Store
+
+node_modules/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -15,7 +18,6 @@ __pycache__/
 
 # Distribution / packaging
 /.Python
-/build/
 /develop-eggs/
 /dist/
 /downloads/
@@ -58,6 +60,8 @@ coverage.xml
 .pytest_cache/
 cover/
 
+backend/
+out/
 # Translations
 *.mo
 *.pot
