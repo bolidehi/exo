@@ -13,17 +13,20 @@ from exo.networking.grpc.grpc_server import GRPCServer
 from exo.networking.udp.udp_discovery import UDPDiscovery
 from exo.networking.tailscale.tailscale_discovery import TailscaleDiscovery
 from exo.networking.grpc.grpc_peer_handle import GRPCPeerHandle
+from exo.telemetry.constants import TelemetryAction
 from exo.topology.ring_memory_weighted_partitioning_strategy import RingMemoryWeightedPartitioningStrategy
 from exo.api import ChatGPTAPI
+from exo.config import session_config
 from exo.download.shard_download import ShardDownloader, RepoProgressEvent, NoopShardDownloader
 from exo.download.hf.hf_shard_download import HFShardDownloader
-from exo.helpers import print_yellow_exo, find_available_port, DEBUG, get_system_info, get_or_create_node_id, get_all_ip_addresses, terminal_link
+from exo.helpers import print_yellow_exo, find_available_port, DEBUG, get_system_info, get_all_ip_addresses, terminal_link
 from exo.inference.shard import Shard
 from exo.inference.inference_engine import get_inference_engine, InferenceEngine
 from exo.inference.dummy_inference_engine import DummyInferenceEngine
 from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration.node import Node
 from exo.models import model_base_shards
+from exo.telemetry.logger import Logger
 from exo.viz.topology_viz import TopologyViz
 
 # parse args
@@ -51,6 +54,7 @@ parser.add_argument("--run-model", type=str, help="Specify a model to run direct
 parser.add_argument("--prompt", type=str, help="Prompt for the model when using --run-model", default="Who are you?")
 parser.add_argument("--tailscale-api-key", type=str, default=None, help="Tailscale API key")
 parser.add_argument("--tailnet-name", type=str, default=None, help="Tailnet name")
+parser.add_argument("--logging-url", type=str, default="https://exo-logs.foobar.dev/api/v1/logs/bulk", help="Logging URL")
 args = parser.parse_args()
 print(f"Selected inference engine: {args.inference_engine}")
 
@@ -71,7 +75,9 @@ if args.node_port is None:
   args.node_port = find_available_port(args.node_host)
   if DEBUG >= 1: print(f"Using available port: {args.node_port}")
 
-args.node_id = args.node_id or get_or_create_node_id()
+if args.node_id:
+  session_config.set("node_id", args.node_id)
+
 chatgpt_api_endpoints = [f"http://{ip}:{args.chatgpt_api_port}/v1/chat/completions" for ip in get_all_ip_addresses()]
 web_chat_urls = [f"http://{ip}:{args.chatgpt_api_port}" for ip in get_all_ip_addresses()]
 if DEBUG >= 0:
@@ -84,7 +90,7 @@ if DEBUG >= 0:
 
 if args.discovery_module == "udp":
   discovery = UDPDiscovery(
-    args.node_id,
+    session_config.get("node_id"),
     args.node_port,
     args.listen_port,
     args.broadcast_port,
@@ -93,7 +99,7 @@ if args.discovery_module == "udp":
   )
 elif args.discovery_module == "tailscale":
   discovery = TailscaleDiscovery(
-    args.node_id,
+    session_config.get("node_id"),
     args.node_port,
     lambda peer_id, address, device_capabilities: GRPCPeerHandle(peer_id, address, device_capabilities),
     discovery_timeout=args.discovery_timeout,
@@ -103,10 +109,10 @@ elif args.discovery_module == "tailscale":
 elif args.discovery_module == "manual":
   if not args.discovery_config_path:
     raise ValueError(f"--discovery-config-path is required when using manual discovery. Please provide a path to a config json file.")
-  discovery = ManualDiscovery(args.discovery_config_path, args.node_id, create_peer_handle=lambda peer_id, address, device_capabilities: GRPCPeerHandle(peer_id, address, device_capabilities))
+  discovery = ManualDiscovery(args.discovery_config_path, session_config.get("node_id"), create_peer_handle=lambda peer_id, address, device_capabilities: GRPCPeerHandle(peer_id, address, device_capabilities))
 topology_viz = TopologyViz(chatgpt_api_endpoints=chatgpt_api_endpoints, web_chat_urls=web_chat_urls) if not args.disable_tui else None
 node = StandardNode(
-  args.node_id,
+  session_config.get("node_id"),
   None,
   inference_engine,
   discovery,
@@ -127,6 +133,9 @@ node.on_token.register("update_topology_viz").on_next(
   lambda req_id, tokens, __: topology_viz.update_prompt_output(req_id, inference_engine.tokenizer.decode(tokens)) if topology_viz and hasattr(inference_engine, "tokenizer") else None
 )
 
+# Initialize the logger singleton
+logger = Logger(args.logging_url, session_config.get("node_id"))
+logger.write_log(TelemetryAction.START)
 
 def preemptively_start_download(request_id: str, opaque_status: str):
   try:
@@ -198,6 +207,7 @@ async def run_model_cli(node: Node, inference_engine: InferenceEngine, model_nam
   except Exception as e:
     print(f"Error processing prompt: {str(e)}")
     traceback.print_exc()
+    raise e
   finally:
     node.on_token.deregister(callback_id)
 
@@ -226,15 +236,27 @@ async def main():
 
 
 def run():
-  loop = asyncio.new_event_loop()
-  asyncio.set_event_loop(loop)
-  try:
-    loop.run_until_complete(main())
-  except KeyboardInterrupt:
-    print("Received keyboard interrupt. Shutting down...")
-  finally:
-    loop.run_until_complete(shutdown(signal.SIGTERM, loop))
-    loop.close()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Received keyboard interrupt. Shutting down...")
+    except Exception as e:
+        # First tear down the TUI if it exists
+        if topology_viz and not args.disable_tui:
+            topology_viz.stop()
+        
+        print(f"\n\nError in run: {str(e)}\n")
+        print("--------------------------------")
+        report = input("\nThere was an error that got triggered in the code, would you like to report it? (y/N): ").strip()
+        if report.lower() == 'y' or report.lower() == 'yes':
+            logger.report_error(e)
+    finally:
+        print("Shutting down")
+        loop.run_until_complete(shutdown(signal.SIGTERM, loop))
+        loop.close()
+        print("Exiting")
 
 
 if __name__ == "__main__":
