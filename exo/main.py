@@ -6,6 +6,11 @@ import logging
 import time
 import traceback
 import uuid
+import platform
+import webbrowser
+import os
+import ssl
+import certifi
 from exo.networking.manual.manual_discovery import ManualDiscovery
 from exo.networking.manual.network_topology_config import NetworkTopology
 from exo.orchestration.standard_node import StandardNode
@@ -42,7 +47,7 @@ parser.add_argument("--discovery-module", type=str, choices=["udp", "tailscale",
 parser.add_argument("--discovery-timeout", type=int, default=30, help="Discovery timeout in seconds")
 parser.add_argument("--discovery-config-path", type=str, default=None, help="Path to discovery config json file")
 parser.add_argument("--wait-for-peers", type=int, default=0, help="Number of peers to wait to connect to before starting")
-parser.add_argument("--chatgpt-api-port", type=int, default=8000, help="ChatGPT API port")
+parser.add_argument("--chatgpt-api-port", type=int, default=52415, help="ChatGPT API port")
 parser.add_argument("--chatgpt-api-response-timeout", type=int, default=90, help="ChatGPT API response timeout in seconds")
 parser.add_argument("--max-generate-tokens", type=int, default=10000, help="Max tokens to generate in each request")
 parser.add_argument("--inference-engine", type=str, default=None, help="Inference engine to use (mlx, tinygrad, or dummy)")
@@ -51,8 +56,17 @@ parser.add_argument("--run-model", type=str, help="Specify a model to run direct
 parser.add_argument("--prompt", type=str, help="Prompt for the model when using --run-model", default="Who are you?")
 parser.add_argument("--tailscale-api-key", type=str, default=None, help="Tailscale API key")
 parser.add_argument("--tailnet-name", type=str, default=None, help="Tailnet name")
+parser.add_argument("--disable-browser-launch", action="store_true", help="Disable browser launch")
 args = parser.parse_args()
 print(f"Selected inference engine: {args.inference_engine}")
+
+def setup_certificates():
+    """Configure SSL certificates for the application."""
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    ssl._create_default_https_context = ssl._create_unverified_context
+
+# Set up SSL certificates
+setup_certificates()
 
 print_yellow_exo()
 
@@ -121,7 +135,8 @@ api = ChatGPTAPI(
   node,
   inference_engine.__class__.__name__,
   response_timeout=args.chatgpt_api_response_timeout,
-  on_chat_completion_request=lambda req_id, __, prompt: topology_viz.update_prompt(req_id, prompt) if topology_viz else None
+  on_chat_completion_request=lambda req_id, __, prompt: topology_viz.update_prompt(req_id, prompt) if topology_viz else None,
+  disable_tinychat=args.disable_browser_launch
 )
 node.on_token.register("update_topology_viz").on_next(
   lambda req_id, tokens, __: topology_viz.update_prompt_output(req_id, inference_engine.tokenizer.decode(tokens)) if topology_viz and hasattr(inference_engine, "tokenizer") else None
@@ -201,6 +216,9 @@ async def run_model_cli(node: Node, inference_engine: InferenceEngine, model_nam
   finally:
     node.on_token.deregister(callback_id)
 
+def open_web_chat():
+  if web_chat_urls:
+    webbrowser.open(web_chat_urls[0])
 
 async def main():
   loop = asyncio.get_running_loop()
@@ -208,9 +226,11 @@ async def main():
   # Use a more direct approach to handle signals
   def handle_exit():
     asyncio.ensure_future(shutdown(signal.SIGTERM, loop))
+  
 
-  for s in [signal.SIGINT, signal.SIGTERM]:
-    loop.add_signal_handler(s, handle_exit)
+  if platform.system() != "Windows":
+    for s in [signal.SIGINT, signal.SIGTERM]:
+      loop.add_signal_handler(s, handle_exit)
 
   await node.start(wait_for_peers=args.wait_for_peers)
 
@@ -222,6 +242,8 @@ async def main():
     await run_model_cli(node, inference_engine, model_name, args.prompt)
   else:
     asyncio.create_task(api.run(port=args.chatgpt_api_port))  # Start the API server as a non-blocking task
+    if not args.disable_browser_launch:
+      open_web_chat()
     await asyncio.Event().wait()
 
 
