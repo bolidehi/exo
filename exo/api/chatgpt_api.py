@@ -17,6 +17,9 @@ from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration import Node
 from exo.models import build_base_shard, model_cards, get_repo, pretty_name
 from typing import Callable
+import os
+from exo.download.hf.hf_helpers import get_hf_home
+from exo.download.hf.hf_shard_download import HFShardDownloader
 
 
 class Message:
@@ -205,24 +208,56 @@ class ChatGPTAPI:
     return web.json_response({"status": "ok"})
 
   async def handle_model_support(self, request):
-    return web.json_response({
-      "model pool": {
-        model_name: pretty_name.get(model_name, model_name) 
-        for model_name in [
-          model_id for model_id, model_info in model_cards.items() 
-          if all(map(
-            lambda engine: engine in model_info["repo"],
-            list(dict.fromkeys([
-              inference_engine_classes.get(engine_name, None) 
-              for engine_list in self.node.topology_inference_engines_pool 
-              for engine_name in engine_list 
-              if engine_name is not None
-            ] + [self.inference_engine_classname]))
-          ))
-        ]
-      }
-    })
-  
+    try:
+        model_pool = {}
+        
+        for model_name, pretty in pretty_name.items():
+            if model_name in model_cards:
+                model_info = model_cards[model_name]
+                
+                # Get required engines
+                required_engines = list(dict.fromkeys([
+                    inference_engine_classes.get(engine_name, None) 
+                    for engine_list in self.node.topology_inference_engines_pool 
+                    for engine_name in engine_list 
+                    if engine_name is not None
+                ] + [self.inference_engine_classname]))
+                
+                # Check if model supports required engines
+                if all(map(lambda engine: engine in model_info["repo"], required_engines)):
+                    shard = build_base_shard(model_name, self.inference_engine_classname)
+                    if shard:
+                        downloader = HFShardDownloader()
+                        downloader.current_shard = shard
+                        downloader.current_repo_id = get_repo(shard.model_id, self.inference_engine_classname)
+                        status = await downloader.get_shard_download_status()
+                        if DEBUG >= 2:
+                            print(f"Download status for {model_name}: {status}")
+                        
+                        # Calculate overall percentage if we have status
+                        download_percentage = None
+                        if status:
+                            percentages = list(status.values())
+                            if percentages:
+                                download_percentage = sum(percentages) / len(percentages)
+                                if DEBUG >= 2:
+                                    print(f"Calculated download percentage for {model_name}: {download_percentage}")
+                        
+                        model_pool[model_name] = {
+                            "name": pretty,
+                            "downloaded": download_percentage == 100 if download_percentage is not None else False,
+                            "download_percentage": download_percentage
+                        }
+        
+        return web.json_response({"model pool": model_pool})
+    except Exception as e:
+        print(f"Error in handle_model_support: {str(e)}")
+        traceback.print_exc()
+        return web.json_response(
+            {"detail": f"Server error: {str(e)}"}, 
+            status=500
+        )
+
   async def handle_get_models(self, request):
     return web.json_response([{"id": model_name, "object": "model", "owned_by": "exo", "ready": True} for model_name, _ in model_cards.items()])
 
